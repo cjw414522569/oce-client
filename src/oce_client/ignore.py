@@ -1,19 +1,23 @@
 """分层忽略规则：硬规则 → 运行时 → .oceignore → .gitignore → 内置默认。
 
-.gitignore 语义
----------------
-根目录与**各子目录**的 .gitignore 都会被读取，按 git 的规则评估：某个
-.gitignore 只管辖自己所在目录及其子树，其中模式相对该目录解释。因此
-`sub/.gitignore` 里的 `generated/` 命中 `sub/generated/` 与
-`sub/deep/generated/`，但不影响 `other/generated/`；左右斜杠开头的
+逐目录语义
+----------
+根目录与**各子目录**的 .gitignore / .oceignore 都会被读取，按 git 的规则
+评估：某个规则文件只管辖自己所在目录及其子树，其中模式相对该目录解释。
+因此 `sub/.gitignore` 里的 `generated/` 命中 `sub/generated/` 与
+`sub/deep/generated/`，但不影响 `other/generated/`；以斜杠开头的
 `/anchored.py` 只命中该目录本身。
+
+一个工作区根下挂多个项目时，每个项目目录里的规则只作用于它自己：
+`proj-a/.gitignore` 不会影响 `proj-b`，`proj-b/.oceignore` 也只过滤
+`proj-b` 子树。
 
 内置默认
 --------
 项目没有 .gitignore（或没覆盖到）时，仍排除各语言生态的构建产物与缓存，
 避免 node_modules、target、__pycache__ 之类噪音进入索引。默认层优先级
-最低，可在 .gitignore/.oceignore 里用 `!pattern` 反选回来；`.git/` 与
-`.oce-client/` 属硬规则，任何层都无法反选。
+最低，可在任意一层 .gitignore/.oceignore 里用 `!pattern` 反选回来；`.git/`
+与 `.oce-client/` 属硬规则，任何层都无法反选。
 """
 
 from __future__ import annotations
@@ -169,7 +173,7 @@ class _RuleLayer:
 
 
 class _ScopedRules:
-    """某目录下的 .gitignore：模式相对该目录解释，只管辖该目录子树。"""
+    """某目录下的规则文件：模式相对该目录解释，只管辖该目录子树。"""
 
     __slots__ = ("base", "depth", "layer")
 
@@ -192,9 +196,11 @@ class _ScopedRules:
 class LayeredIgnoreMatcher:
     """Merge runtime, project, per-directory git, and built-in ignore rules.
 
-    优先级（高 → 低）：硬规则 > 运行时(--ignore) > .oceignore > .gitignore
-    （目录越深越优先）> 内置默认。首个给出结论的层即生效，因此高层可以用
-    反选改写低层判断。
+    优先级（高 → 低）：硬规则 > 运行时(--ignore) > 各目录 .oceignore >
+    各目录 .gitignore > 内置默认。同层级里目录越深越优先；不同规则文件家族
+    之间 .oceignore 整体优先于 .gitignore（含深层的 git 规则），这样某个
+    项目想用 .oceignore 反选默认规则时不会被别处的 .gitignore 抢先下结论。
+    首个给出结论的层即生效。
     """
 
     def __init__(
@@ -209,14 +215,21 @@ class LayeredIgnoreMatcher:
         self.root = root
         self._hard = _RuleLayer(_HARD_PATTERNS)
         self._runtime = _RuleLayer(runtime_patterns)
-        self._oce = _RuleLayer(self._read_lines(root / oceignore_name))
+        self._oce: list[_ScopedRules] = [
+            _ScopedRules("", _RuleLayer(self._read_lines(root / oceignore_name)))
+        ]
         self._git: list[_ScopedRules] = [
             _ScopedRules("", _RuleLayer(self._read_lines(root / gitignore_name)))
         ]
         if scan_ignore_files:
-            self._git.extend(self._scan_gitignores(root, gitignore_name))
-        # 深层规则优先于浅层：git 的逐目录 .gitignore 语义要求整表按深度降序，
-        # 根层若排在前面会先给结论，深层的反选就永远看不到。
+            oce_rules, git_rules = self._scan_rules(
+                root, oceignore_name, gitignore_name
+            )
+            self._oce.extend(oce_rules)
+            self._git.extend(git_rules)
+        # 深层规则优先于浅层：逐目录语义要求整表按深度降序，根层若排在前面
+        # 先给结论，深层的反选就永远看不到。
+        self._oce.sort(key=lambda item: item.depth, reverse=True)
         self._git.sort(key=lambda item: item.depth, reverse=True)
         self._defaults = _RuleLayer(DEFAULT_PATTERNS + DEFAULT_FILE_PATTERNS)
 
@@ -228,13 +241,16 @@ class LayeredIgnoreMatcher:
             return []
 
     @classmethod
-    def _scan_gitignores(cls, root: Path, gitignore_name: str) -> list[_ScopedRules]:
-        """收集各子目录的 .gitignore（根目录那份由 __init__ 负责）。
+    def _scan_rules(
+        cls, root: Path, oceignore_name: str, gitignore_name: str
+    ) -> tuple[list[_ScopedRules], list[_ScopedRules]]:
+        """一次遍历收集两族规则文件（根目录那两份由 __init__ 负责）。
 
         用裸字符串管理深度与相对路径：os.walk 已给出目录串，逐目录
         Path.relative_to 在十万级目录的仓库上是主要开销。
         """
-        found: list[_ScopedRules] = []
+        oce_found: list[_ScopedRules] = []
+        git_found: list[_ScopedRules] = []
         root_str = os.path.abspath(os.fspath(root))
         root_depth = root_str.rstrip(os.sep).count(os.sep)
         for directory, dirnames, filenames in os.walk(root_str, followlinks=False):
@@ -243,12 +259,18 @@ class LayeredIgnoreMatcher:
                 dirnames[:] = []
                 continue
             dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS]
-            if directory != root_str and gitignore_name in filenames:
-                rule = _RuleLayer(cls._read_lines(Path(directory) / gitignore_name))
-                if not rule.empty:
-                    base = os.path.relpath(directory, root_str).replace(os.sep, "/")
-                    found.append(_ScopedRules(base, rule))
-        return found
+            if directory == root_str:
+                continue
+            base = os.path.relpath(directory, root_str).replace(os.sep, "/")
+            for name, target in (
+                (oceignore_name, oce_found),
+                (gitignore_name, git_found),
+            ):
+                if name in filenames:
+                    rule = _RuleLayer(cls._read_lines(Path(directory) / name))
+                    if not rule.empty:
+                        target.append(_ScopedRules(base, rule))
+        return oce_found, git_found
 
     def ignores(self, path: str, *, is_dir: bool = False) -> bool:
         normalized = path.replace("\\", "/")
@@ -257,11 +279,15 @@ class LayeredIgnoreMatcher:
         # A hard rule cannot be undone by a higher-priority negation.
         if self._hard.match(normalized, is_dir) is True:
             return True
-        for layer in (self._runtime, self._oce):
+        for layer in (self._runtime,):
             decision = layer.match(normalized, is_dir)
             if decision is not None:
                 return decision
-        # 深层 .gitignore 优先于浅层：列表已在构造时按 depth 降序排好
+        # 两层都在构造时按 depth 降序排好：深层文件优先于浅层
+        for scoped in self._oce:
+            decision = scoped.match(normalized, is_dir)
+            if decision is not None:
+                return decision
         for scoped in self._git:
             decision = scoped.match(normalized, is_dir)
             if decision is not None:

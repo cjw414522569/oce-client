@@ -82,11 +82,17 @@ Files are filtered by a layered matcher, highest precedence first:
 | Git | `.gitignore` in the root and in every subdirectory |
 | Built-in | Language build outputs and caches |
 
-`.gitignore` files follow git semantics: each one governs its own directory
-subtree and its patterns are relative to that directory, so `sub/.gitignore`
-containing `generated/` hides `sub/generated/` but not `other/generated/`.
-Deeper files take precedence over shallower ones, so a nested `!local.py` can
-re-include a file excluded by the root `.gitignore`.
+Both `.gitignore` and `.oceignore` are read from the workspace root **and from
+every subdirectory**, following git semantics: each file governs its own
+directory subtree and its patterns are relative to that directory, so
+`sub/.gitignore` containing `generated/` hides `sub/generated/` but not
+`other/generated/`. Deeper files take precedence over shallower ones, so a
+nested `!local.py` can re-include a file excluded by the root `.gitignore`.
+
+This makes a workspace root holding several projects behave predictably: rules
+in `proj-a/` only affect `proj-a/`, rules in `proj-b/` only affect `proj-b/`,
+and each project keeps its own `.oceignore` overrides. The built-in layer
+applies to every project regardless of which language it is written in.
 
 The built-in layer keeps the index free of noise even when a project has no
 `.gitignore`: `node_modules/`, `target/`, `__pycache__/`, `.next/`, `dist/`,
