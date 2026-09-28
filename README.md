@@ -70,6 +70,32 @@ The two interfaces have different lifecycles:
 | CLI | one `--root` or `OCE_WORKSPACE` | `--state-path` or `OCE_STATE_PATH` | explicit `sync`, optional `watch` |
 | MCP | repeated `--workspace`, `OCE_WORKSPACE`, `OCE_WORKSPACES`, or the launch directory by default | one `--state-path`, or per-workspace `--state-dir` | process-owned background and incremental sync |
 
+## Ignore Rules
+
+Files are filtered by a layered matcher, highest precedence first:
+
+| Layer | Source |
+| --- | --- |
+| Hard | `.git/`, `.oce-client/` (cannot be re-included) |
+| Runtime | `--ignore` / `OCE_IGNORE` |
+| Project | `.oceignore` in the workspace root |
+| Git | `.gitignore` in the root and in every subdirectory |
+| Built-in | Language build outputs and caches |
+
+`.gitignore` files follow git semantics: each one governs its own directory
+subtree and its patterns are relative to that directory, so `sub/.gitignore`
+containing `generated/` hides `sub/generated/` but not `other/generated/`.
+Deeper files take precedence over shallower ones, so a nested `!local.py` can
+re-include a file excluded by the root `.gitignore`.
+
+The built-in layer keeps the index free of noise even when a project has no
+`.gitignore`: `node_modules/`, `target/`, `__pycache__/`, `.next/`, `dist/`,
+`build/`, `_build/`, `.dart_tool/`, `obj/`, and similar. It is the lowest
+precedence layer, so `!pattern` in `.gitignore` or `.oceignore` re-includes an
+entry. Deliberately excluded are ambiguous names such as `bin/`, `lib/`,
+`out/`, `packages/`, and `vendor/`, which are normal source directories in
+C++, Go, and monorepo layouts.
+
 ## MCP
 
 Install the optional MCP extra and expose the stdio server to an MCP host:
