@@ -162,7 +162,10 @@ def test_sync_add_modify_delete_and_restore(tmp_path: Path):
         first = context.sync()
         assert first.checkpoint_id == "chain:1"
         old_name = first.added_blobs[0]
-        (tmp_path / "src" / "main.py").write_text("two", encoding="utf-8")
+        # 改成长度不同的内容：同尺寸改写可能落在同一 mtime 粒度内，
+        # 会被"未改动"快速路径跳过（该路径按 (size, mtime_ns) 判定），
+        # 与本次要验证的变更检测无关，故刻意避开。
+        (tmp_path / "src" / "main.py").write_text("two-two", encoding="utf-8")
         second = context.sync()
         assert old_name in second.deleted_blobs
         assert len(second.added_blobs) == 1
